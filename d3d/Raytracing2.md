@@ -1,6 +1,6 @@
 # DirectX Raytracing (DXR) Functional Spec, Part 2 <!-- omit in toc -->
 
-v0.17 3/12/2026
+v0.18 3/16/2026
 
 ---
 
@@ -63,7 +63,10 @@ v0.17 3/12/2026
         - [D3D12\_RTAS\_OPERATION\_BUILD\_BLAS\_FROM\_CLAS\_ARGS](#d3d12_rtas_operation_build_blas_from_clas_args)
         - [D3D12\_RTAS\_OPERATION\_MOVE\_CLUSTER\_OBJECTS\_ARGS](#d3d12_rtas_operation_move_cluster_objects_args)
         - [D3D12\_RTAS\_OPERATION\_BUILD\_CLUSTER\_TEMPLATES\_FROM\_TRIANGLES\_ARGS](#d3d12_rtas_operation_build_cluster_templates_from_triangles_args)
-      - [D3D12\_VERTEX\_FORMAT\_COMPRESSED1\_TEMPLATE\_HEADER](#d3d12_vertex_format_compressed1_template_header)
+        - [D3D12\_VERTEX\_FORMAT\_COMPRESSED1\_TEMPLATE\_HEADER](#d3d12_vertex_format_compressed1_template_header)
+        - [Compressed1 bitfield helper macros](#compressed1-bitfield-helper-macros)
+          - [D3D12\_VERTEX\_FORMAT\_COMPRESSED1\_HEADER macros](#d3d12_vertex_format_compressed1_header-macros)
+          - [D3D12\_VERTEX\_FORMAT\_COMPRESSED1\_TEMPLATE\_HEADER macros](#d3d12_vertex_format_compressed1_template_header-macros)
         - [D3D12\_RTAS\_OPERATION\_INSTANTIATE\_CLUSTER\_TEMPLATES\_ARGS](#d3d12_rtas_operation_instantiate_cluster_templates_args)
         - [D3D12\_RTAS\_PARTITIONED\_TLAS\_OPERATION](#d3d12_rtas_partitioned_tlas_operation)
         - [D3D12\_RTAS\_PARTITIONED\_TLAS\_OPERATION\_TYPE](#d3d12_rtas_partitioned_tlas_operation_type)
@@ -265,33 +268,37 @@ In detail:
 > Note vertex count isn't needed here as it is part of the overall cluster description.  See `VertexCount` in GPU-side build arguments: [D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_clas_from_triangles_args) and [D3D12_RTAS_OPERATION_BUILD_CLUSTER_TEMPLATES_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_cluster_templates_from_triangles_args).  Also see the `Max*` counts in CPU-side build inputs description:[D3D12_RTAS_CLUSTER_LIMITS](#d3d12_rtas_cluster_limits).
 
 ```C++
+// D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER bit assignments:
+//
+// field0:
+//  [07:00] exponent   - Float32 scale (exponent-only) with bias 127.
+//                       Stored biased range: 1-232 (actual exponent range: [-126..105]).
+//                       Must add 127 to the actual exponent before encoding.
+//                       Must subtract 127 after decoding to get the actual exponent.
+//  [31:08] x_anchor   - 24-bit signed two's complement.
+//                       0x800000 represents -8,388,608.
+//
+// field1:
+//  [03:00] x_bits     - Component bit count for x, stored as (count - 1).
+//                       Must subtract 1 from the actual bit count before encoding.
+//                       Must add 1 after decoding to get the actual bit count (1-16).
+//  [07:04] y_bits     - Component bit count for y, stored as (count - 1). Same bias as x_bits.
+//  [31:08] y_anchor   - 24-bit signed two's complement.
+//
+// field2:
+//  [03:00] z_bits     - Component bit count for z, stored as (count - 1). Same bias as x_bits.
+//  [07:04] unused
+//  [31:08] z_anchor   - 24-bit signed two's complement.
+
 typedef struct D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER
 {
-    // uint_32 0
-    UINT exponent             :  8; // Float32 scale (exponent-only) with bias 127. 
-                                        // 1-232 are supported, resulting in range [-126..105].
-    INT  x_anchor             : 24; // 24-bit signed two's complement 
-                                        // (0x800000 represents -8,388,608)
-
-    // uint_32 1
-    UINT x_bits               :  4; // 1-16 (add 1 when decoding)
-    UINT y_bits               :  4; // 1-16 (add 1 when decoding)
-    INT  y_anchor             : 24; // 24-bit signed two's complement
-
-    // uint_32 2
-    UINT z_bits               :  4; // 1-16 (add 1 when decoding)
-    UINT unused               :  4;
-    INT  z_anchor             : 24; // 24-bit signed two's complement
+    UINT field0;
+    UINT field1;
+    UINT field2;
 } D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER;
 ```
 
-This struct definition shown from `d3d12.h` can be copied to HLSL with the following definitions along with HLSL 2021 to get bitfield support (or replacing types):
-
-```C++
-typedef uint32_t UINT;
-typedef int32_t INT;
-```
-
+The fields within this struct are packed into plain `UINT` members rather than C++ bitfields in order to guarantee portable layout across C++ compilers, architectures, and HLSL. Helper encode/decode macros are provided in `d3d12.h` for accessing individual fields that also work in HLSL. See [Compressed1 bitfield helper macros](#compressed1-bitfield-helper-macros).
   
 (2) Vertex block
 
@@ -967,7 +974,7 @@ With the CLAS and Cluster BLAS model, this source of unpredictability shifts fro
 
 Any remaining sources of internal fragmentation in the clustered model can be handled transparently by implementations or are insignificant.
 
-For these reasons the option to compact of individual CLAS / CBLAS isn't necessary.
+For these reasons the option to compact individual CLAS / CBLAS isn't necessary.
 
 ---
 
@@ -1433,17 +1440,16 @@ typedef struct D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS
 {
     UINT ClusterID;
     UINT ClusterFlags;
-    UINT TriangleCount : 9;
-    UINT VertexCount : 9;
-    UINT PositionTruncateBitCount : 6;
-    UINT ReservedPadding : 8;
+    UINT16 TriangleCount;
+    UINT16 VertexCount;
     UINT BaseGeometryIndexAndFlags;
     UINT OpacityMicromapBaseLocation;
     UINT16 VertexBufferStride;
     UINT16 IndexBufferStride;
-    UINT16 GeometryIndexAndFlagsArrayStride;
     UINT16 OpacityMicromapIndexBufferStride;
-    UINT ReservedPadding2;
+    UINT16 GeometryIndexAndFlagsArrayStride;
+    UINT16 PositionTruncateBitCount;
+    UINT16 ReservedPadding;
     D3D12_GPU_VIRTUAL_ADDRESS VertexBuffer;
     D3D12_GPU_VIRTUAL_ADDRESS IndexBuffer;
     D3D12_GPU_VIRTUAL_ADDRESS GeometryIndexAndFlagsArray;
@@ -1453,7 +1459,7 @@ typedef struct D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS
 } D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS;
 ```
 
-GPU-side arguments for building a CLAS from triangle data.  This struct definition shown from `d3d12.h` can be copied to HLSL with the following definitions, along with HLSL 2021 to get bitfield support and compiler flag `-enable-16bit-types`:
+GPU-side arguments for building a CLAS from triangle data.  This struct definition shown from `d3d12.h` can be copied to HLSL with the following definitions, along with compiler flag `-enable-16bit-types`:
 
 ```C++
 typedef uint32_t UINT;
@@ -1465,15 +1471,15 @@ Member                                    | Definition
 ------                                    | ----------
 `UINT ClusterID`                          | The 32-bit ClusterID value that will be encoded into the CLAS and that can be retrieved from a hit shader.
 `UINT ClusterFlags`                       | Any combination of values of [D3D12_RTAS_OPERATION_CLAS_FLAGS](#d3d12_rtas_cluster_operation_clas_flags)
-`UINT TriangleCount`                      | Number of triangles the CLAS will be constructed from.  Valid range: `[0..256]`.  `0` just produces an empty `CLAS` that can still be used, but will obviously never produce any hits.
-`UINT VertexCount`                        | Number of unique values in the index buffer.  Valid range: `[0..256]`. `0` just produces an empty `CLAS` that can still be used, but will obviously never produce any hits.
-`UINT PositionTruncateBitCount`           | Number of bits, starting at the lowest bit (i.e. the LSBs of the mantissa), of each vertex position to truncate to zero *after converting the data to float32*.  Improves compression. Cannot be more than 32, though since it applies to float32 where there are 23 bits of mantissa, in practice truncate bit counts greater than 23 don't really make sense. Applies to the cluster's [VertexFormat](#d3d12_rtas_cluster_triangles_inputs_desc), and for cluster templates, [VertexInstantiationFormat](#d3d12_rtas_cluster_template_triangles_inputs_desc).  Ignored if [D3D12_VERTEX_FORMAT](#d3d12_vertex_format) is `D3D12_VERTEX_FORMAT_COMPRESSED1`.  
-`UINT BaseGeometryIndexAndFlags`                                         | <p>A GeometryIndex value and [D3D12_RTAS_CLUSTERED_GEOMETRY_FLAGS](#d3d12_rtas_clustered_geometry_flags) value used as a base for all triangles in the CLAS. If `GeometryIndexAndFlagsArray` is NULL, the Geometry Index value is taken from the lower 24 bits of `BaseGeometryIndexAndFlags` and the flags value is taken from the upper 8 bits.</p><p>If `GeometryIndexAndFlagsArray` is non-NULL, the final Geometry Index of each triangle is equal to the result of the addition of the lower 24-bit of `BaseGeometryIndexAndFlags` and the lower 24-bit of the per-triangle value retrieved from the `GeometryIndexAndFlagsArray`. The maximum GeometryIndex after addition is either 16777215 (the maximum value that can be represented in 24 bits), see [`D3D12_RAYTRACING_MAXIMUM_GEOMETRY_INDEX`](#constants) or `MaxGeometryIndexValue` in [D3D12_RTAS_CLUSTER_LIMITS](#d3d12_rtas_cluster_limits) used with this build call, whichever is smaller, otherwise behavior is undefined.</p><p>If `GeometryIndexAndFlagsArray` is non-NULL, the final geometry flags used for each triangle is equivalent to the local or of the upper 8-bit of `BaseGeometryIndexAndFlags` combined by logical OR with the upper 8-bit of the per-triangle value retrieved from the `GeometryIndexAndFlagsArray`. For general geometry index discussion see [The role of geometry index in a cluster](#the-role-of-geometry-index-in-a-cluster).</p>
+`UINT16 TriangleCount`                    | Number of triangles the CLAS will be constructed from.  Valid range: `[0..256]`.  `0` just produces an empty `CLAS` that can still be used, but will obviously never produce any hits.
+`UINT16 VertexCount`                      | Number of unique values in the index buffer.  Valid range: `[0..256]`. `0` just produces an empty `CLAS` that can still be used, but will obviously never produce any hits.
+`UINT BaseGeometryIndexAndFlags`          | <p>A GeometryIndex value and [D3D12_RTAS_CLUSTERED_GEOMETRY_FLAGS](#d3d12_rtas_clustered_geometry_flags) value used as a base for all triangles in the CLAS. If `GeometryIndexAndFlagsArray` is NULL, the Geometry Index value is taken from the lower 24 bits of `BaseGeometryIndexAndFlags` and the flags value is taken from the upper 8 bits.</p><p>If `GeometryIndexAndFlagsArray` is non-NULL, the final Geometry Index of each triangle is equal to the result of the addition of the lower 24-bit of `BaseGeometryIndexAndFlags` and the lower 24-bit of the per-triangle value retrieved from the `GeometryIndexAndFlagsArray`. The maximum GeometryIndex after addition is either 16777215 (the maximum value that can be represented in 24 bits), see [`D3D12_RAYTRACING_MAXIMUM_GEOMETRY_INDEX`](#constants) or `MaxGeometryIndexValue` in [D3D12_RTAS_CLUSTER_LIMITS](#d3d12_rtas_cluster_limits) used with this build call, whichever is smaller, otherwise behavior is undefined.</p><p>If `GeometryIndexAndFlagsArray` is non-NULL, the final geometry flags used for each triangle is equivalent to the local or of the upper 8-bit of `BaseGeometryIndexAndFlags` combined by logical OR with the upper 8-bit of the per-triangle value retrieved from the `GeometryIndexAndFlagsArray`. For general geometry index discussion see [The role of geometry index in a cluster](#the-role-of-geometry-index-in-a-cluster).</p>
 `UINT OpacityMicromapBaseLocation`        | Constant added to all non-uniform OMM indices in `OpacityMicromapIndexBuffer`.  For the non-indexed case it also offsets the range of entries used in an OMM Array.
 `UINT16 VertexBufferStride`               | Stride for vertex buffer data.  Ignored if `VertexBuffer` is null or if [D3D12_VERTEX_FORMAT](#d3d12_vertex_format) is `D3D12_VERTEX_FORMAT_COMPRESSED1`. `0` means to take the natural stride of the vertex type.  Must result in data aligned to component size.
-`UINT16 IndexBufferStride`                | The stride, in bytes, of the array referenced by the `IndexBuffer` field. If the stride is set to 0, behavior defaults to using the size of an index value (depending on the index format) as stride. Values must be a multiple of the index size.
-`UINT16 GeometryIndexAndFlagsArrayStride` | The stride, in bytes, of the array referenced by the `GeometryIndexAndFlagsArray` field. If the stride is set to 0, behavior defaults to using 4 bytes as stride. Stride must be a multiple of 4. For general geometry index discussion see [The role of geometry index in a cluster](#the-role-of-geometry-index-in-a-cluster).
+`UINT16 IndexBufferStride`                | The stride, in bytes, of the array referenced by the `IndexBuffer` field. If the stride is set to 0, behavior defaults to using the size of an index value (depending on the index format) as stride. Valid values: 0 (natural) or a multiple of the selected index size, capped at 4 bytes. The purpose of this stride is just for cases where an application may have index values of a larger size (e.g. 4 bytes) but knows the values would happen to fit in a smaller size like 1 byte, which implementations might process more efficiently.  The intent isn't for interleaving arbitrary data between indices (something more reasonable to do with the other stride values in this struct).
 `UINT16 OpacityMicromapIndexBufferStride` | The stride, in bytes, of the array referenced by the `OpacityMicromapIndexBuffer` field. If the stride is set to 0, behavior defaults to the size of an index value (depending on the index format) as stride. Stride must be a multiple of index size.
+`UINT16 GeometryIndexAndFlagsArrayStride` | The stride, in bytes, of the array referenced by the `GeometryIndexAndFlagsArray` field. If the stride is set to 0, behavior defaults to using 4 bytes as stride. Stride must be a multiple of 4. For general geometry index discussion see [The role of geometry index in a cluster](#the-role-of-geometry-index-in-a-cluster).
+`UINT16 PositionTruncateBitCount`         | Number of bits, starting at the lowest bit (i.e. the LSBs of the mantissa), of each vertex position to truncate to zero *after converting the data to float32*.  Improves compression. Cannot be more than 32, though since it applies to float32 where there are 23 bits of mantissa, in practice truncate bit counts greater than 23 don't really make sense. Applies to the cluster's [VertexFormat](#d3d12_rtas_cluster_triangles_inputs_desc), and for cluster templates, [VertexInstantiationFormat](#d3d12_rtas_cluster_template_triangles_inputs_desc).  Ignored if [D3D12_VERTEX_FORMAT](#d3d12_vertex_format) is `D3D12_VERTEX_FORMAT_COMPRESSED1`.  
 `D3D12_GPU_VIRTUAL_ADDRESS VertexBuffer`  | <p>The address where vertex data starts.  Contents depend on selected [D3D12_VERTEX_FORMAT](#d3d12_vertex_format).  Address must align vertex data to component size.  If a compressed format like [COMPRESSED1](#compressed1-position-encoding), the format definition defines the required alignment.</p><p>When the overall struct is used as part of cluster _template_ construction via [D3D12_RTAS_OPERATION_BUILD_CLUSTER_TEMPLATES_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_cluster_templates_from_triangles_args), the `VertexBuffer` member can be null, though optionally a `VertexBuffer` can be provided as a hint.  See [Cluster templates](#cluster-templates). See [resource state for read-only arguments](#resource-state-for-read-only-arguments).</p>
 `D3D12_GPU_VIRTUAL_ADDRESS IndexBuffer`   | The address of a strided array of indices sized equal to `TriangleCount` multiplied by 3, identifying the vertices to construct each triangle of the CLAS from. Address must be aligned to the index size. See [resource state for read-only arguments](#resource-state-for-read-only-arguments).
 `D3D12_GPU_VIRTUAL_ADDRESS GeometryIndexAndFlagsArray` | Either NULL or the address of a strided array of GeometryIndices combined with values from [D3D12_RTAS_CLUSTERED_GEOMETRY_FLAGS](#d3d12_rtas_clustered_geometry_flags).  If `GeometryIndexAndFlagsBuffer` is used, the number of entries is sufficient for what the index buffer will point to, otherwise equal to the number of triangles. For general geometry index discussion see [The role of geometry index in a cluster](#the-role-of-geometry-index-in-a-cluster).  Address must be 4 byte aligned. See [resource state for read-only arguments](#resource-state-for-read-only-arguments).
@@ -1572,6 +1578,8 @@ Until HLSL gets union support, a specific variant of the args needs to be declar
 ```C++
 // Example of flattening the union for HLSL
 
+typedef uint32_t UINT;
+typedef uint16_t UINT16;
 typedef uint64_t D3D12_GPU_VIRTUAL_ADDRESS;
 
 // Assumes D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS and 
@@ -1586,22 +1594,36 @@ typedef struct D3D12_RTAS_OPERATION_BUILD_CLUSTER_TEMPLATES_FROM_TRIANGLES_ARGS_
 {
     D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS TrianglesArgs;
     D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER Compressed1TemplateHeader;
+    // D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER is a single UINT (field0).
+    // Use helper macros linked below to encode/decode fields within it.
     UINT UnusedPadding;
 } D3D12_RTAS_OPERATION_BUILD_CLUSTER_TEMPLATES_FROM_TRIANGLES_ARGS_COMPRESSED1;
 
 ```
 
+To encode/decode the `Compressed1TemplateHeader` field, see [Compressed1 bitfield helper macros](#compressed1-bitfield-helper-macros).
+
 ---
 
-#### D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER
+##### D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER
 
 ```C++
+// D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER bit assignments:
+//
+// field0:
+//  [07:00] exponent   - Float32 scale (exponent-only) with bias 127.
+//                       Must add 127 to the actual exponent before encoding.
+//                       Must subtract 127 after decoding to get the actual exponent.
+//  [11:08] x_bits     - Component bit count for x, stored as (count - 1).
+//                       Must subtract 1 from the actual bit count before encoding.
+//                       Must add 1 after decoding to get the actual bit count (1-16).
+//  [15:12] y_bits     - Component bit count for y, stored as (count - 1). Same bias as x_bits.
+//  [19:16] z_bits     - Component bit count for z, stored as (count - 1). Same bias as x_bits.
+//  [31:20] unused
+
 typedef struct D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER
 {
-    UINT exponent : 8;
-    UINT x_bits : 4;
-    UINT y_bits : 4;
-    UINT z_bits : 4;
+    UINT field0;
 } D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER;
 ```
 
@@ -1609,10 +1631,116 @@ See [Compressed1 with cluster templates](#compressed1-with-cluster-templates) ab
 
 Referenced by `Compressed1TemplateHeader` member of [D3D12_RTAS_OPERATION_BUILD_CLUSTER_TEMPLATES_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_cluster_templates_from_triangles_args).
 
-This struct definition shown from `d3d12.h` can be copied to HLSL with the following definition, along with HLSL 2021 to get bitfield support:
+The fields within this struct are packed into a plain `UINT` member rather than C++ bitfields in order to guarantee portable layout across C++ compilers, architectures, and HLSL. Helper encode/decode macros are provided in `d3d12.h` for accessing individual fields that also work in HLSL.  See [Compressed1 bitfield helper macros](#compressed1-bitfield-helper-macros).
+
+---
+
+##### Compressed1 bitfield helper macros
+
+The [D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER](#compressed1-position-encoding) and [D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER](#d3d12_vertex_format_compressed1_template_header) structs use plain `UINT` members with bitfields packed manually, rather than C++ bitfield syntax. This ensures portable layout across C++ compilers, target architectures, and HLSL — since bitfield layout is implementation-defined in the C++ standard and not reliably supported in HLSL compilers.
+
+The following helper macros are provided in `d3d12.h` for encoding and decoding individual fields within these structs. 
+
+With these typedefs, the macros below can be copied verbatim from `d3d12.h` into HLSL:
 
 ```C++
-typedef uint32_t UINT;
+typedef uint UINT;
+typedef int INT;
+```
+---
+
+###### D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER macros
+
+```C++
+// 24-bit sign extension (portable, no arithmetic-shift dependency)
+#define D3D12_COMPRESSED1_SIGN_EXTEND_24(val) \
+    ((INT)(((val) ^ 0x800000) - 0x800000))
+
+// ENCODER MACRO: Store exponent field (read-modify-write). Caller must pass biased exponent (actual + 127).
+#define ENCODE_D3D12_COMPRESSED1_EXPONENT(header, exponent)  ((header).field0 = ((header).field0 & 0xFFFFFF00) | ((UINT)(exponent) & 0xFF))
+
+// ENCODER MACRO: Store x_anchor field (read-modify-write).
+#define ENCODE_D3D12_COMPRESSED1_X_ANCHOR(header, x_anchor)  ((header).field0 = ((header).field0 & 0xFF) | (((UINT)(x_anchor) << 8) & 0xFFFFFF00))
+
+// ENCODER MACRO: Store x_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_X_BITS(header, x_bits)    ((header).field1 = ((header).field1 & ~0xF) | ((UINT)(x_bits) & 0xF))
+
+// ENCODER MACRO: Store y_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_Y_BITS(header, y_bits)    ((header).field1 = ((header).field1 & ~0xF0) | (((UINT)(y_bits) & 0xF) << 4))
+
+// ENCODER MACRO: Store y_anchor field (read-modify-write).
+#define ENCODE_D3D12_COMPRESSED1_Y_ANCHOR(header, y_anchor)  ((header).field1 = ((header).field1 & 0xFF) | (((UINT)(y_anchor) << 8) & 0xFFFFFF00))
+
+// ENCODER MACRO: Store z_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_Z_BITS(header, z_bits)    ((header).field2 = ((header).field2 & ~0xF) | ((UINT)(z_bits) & 0xF))
+
+// ENCODER MACRO: Store z_anchor field (read-modify-write).
+#define ENCODE_D3D12_COMPRESSED1_Z_ANCHOR(header, z_anchor)  ((header).field2 = ((header).field2 & 0xFF) | (((UINT)(z_anchor) << 8) & 0xFFFFFF00))
+
+// ENCODER MACRO Store all field0 members: exponent and x_anchor. Caller must pass biased exponent (actual + 127).
+#define ENCODE_D3D12_COMPRESSED1_EXPONENT_X_ANCHOR(header, exponent, x_anchor) \
+    ((header).field0 = (((UINT)(exponent) & 0xFF) | (((UINT)(x_anchor) << 8) & 0xFFFFFF00)))
+
+// ENCODER MACRO Store all field1 members: x_bits, y_bits, and y_anchor. Caller must pass (bit_count - 1) for x_bits and y_bits.
+#define ENCODE_D3D12_COMPRESSED1_XY_BITS_Y_ANCHOR(header, x_bits, y_bits, y_anchor) \
+    ((header).field1 = (((UINT)(x_bits) & 0xF) | (((UINT)(y_bits) & 0xF) << 4) | (((UINT)(y_anchor) << 8) & 0xFFFFFF00)))
+
+// ENCODER MACRO Store all field2 members: z_bits and z_anchor. Caller must pass (bit_count - 1) for z_bits. Bits [07:04] are set to zero (unused).
+#define ENCODE_D3D12_COMPRESSED1_Z_BITS_Z_ANCHOR(header, z_bits, z_anchor) \
+    ((header).field2 = (((UINT)(z_bits) & 0xF) | (((UINT)(z_anchor) << 8) & 0xFFFFFF00)))
+
+// DECODER MACRO: Extract the 8-bit biased exponent. Caller must subtract 127 from result to get the actual exponent.
+#define DECODE_D3D12_COMPRESSED1_EXPONENT(header)  (((header).field0) & 0xFF)
+
+// DECODER MACRO: Extract the 24-bit x_anchor as a signed integer.
+#define DECODE_D3D12_COMPRESSED1_X_ANCHOR(header)  D3D12_COMPRESSED1_SIGN_EXTEND_24((((header).field0) >> 8) & 0xFFFFFF)
+
+// DECODER MACRO: Extract the 4-bit x_bits value. Caller must add 1 to result to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_X_BITS(header)    (((header).field1) & 0xF)
+
+// DECODER MACRO: Extract the 4-bit y_bits value. Caller must add 1 to result to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_Y_BITS(header)    ((((header).field1) >> 4) & 0xF)
+
+// DECODER MACRO: Extract the 24-bit y_anchor as a signed integer.
+#define DECODE_D3D12_COMPRESSED1_Y_ANCHOR(header)  D3D12_COMPRESSED1_SIGN_EXTEND_24((((header).field1) >> 8) & 0xFFFFFF)
+
+// DECODER MACRO: Extract the 4-bit z_bits value. Caller must add 1 to result to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_Z_BITS(header)    (((header).field2) & 0xF)
+
+// DECODER MACRO: Extract the 24-bit z_anchor as a signed integer.
+#define DECODE_D3D12_COMPRESSED1_Z_ANCHOR(header)  D3D12_COMPRESSED1_SIGN_EXTEND_24((((header).field2) >> 8) & 0xFFFFFF)
+```
+
+###### D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER macros
+
+```C++
+// ENCODER MACRO: Store exponent field (read-modify-write). Caller must pass biased exponent (actual + 127).
+#define ENCODE_D3D12_COMPRESSED1_TEMPLATE_EXPONENT(header, exponent)  ((header).field0 = ((header).field0 & ~0xFF) | ((UINT)(exponent) & 0xFF))
+
+// ENCODER MACRO: Store x_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_TEMPLATE_X_BITS(header, x_bits)    ((header).field0 = ((header).field0 & ~0xF00) | (((UINT)(x_bits) & 0xF) << 8))
+
+// ENCODER MACRO: Store y_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_TEMPLATE_Y_BITS(header, y_bits)    ((header).field0 = ((header).field0 & ~0xF000) | (((UINT)(y_bits) & 0xF) << 12))
+
+// ENCODER MACRO: Store z_bits field (read-modify-write). Caller must pass (bit_count - 1).
+#define ENCODE_D3D12_COMPRESSED1_TEMPLATE_Z_BITS(header, z_bits)    ((header).field0 = ((header).field0 & ~0xF0000) | (((UINT)(z_bits) & 0xF) << 16))
+
+// ENCODER MACRO: Store all members: exponent, x_bits, y_bits, and z_bits. Caller must pass biased exponent (actual + 127) and (bit_count - 1) for each bits field. Bits [31:20] are set to zero (unused).
+#define ENCODE_D3D12_COMPRESSED1_TEMPLATE(header, exponent, x_bits, y_bits, z_bits) \
+    ((header).field0 = (((UINT)(exponent) & 0xFF) | (((UINT)(x_bits) & 0xF) << 8) | (((UINT)(y_bits) & 0xF) << 12) | (((UINT)(z_bits) & 0xF) << 16)))
+
+// DECODER MACRO: Extract the 8-bit biased exponent. Caller must subtract 127 to get the actual exponent.
+#define DECODE_D3D12_COMPRESSED1_TEMPLATE_EXPONENT(header)  (((header).field0) & 0xFF)
+
+// DECODER MACRO: Extract the 4-bit x_bits value. Caller must add 1 to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_TEMPLATE_X_BITS(header)    ((((header).field0) >> 8) & 0xF)
+
+// DECODER MACRO: Extract the 4-bit y_bits value. Caller must add 1 to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_TEMPLATE_Y_BITS(header)    ((((header).field0) >> 12) & 0xF)
+
+// DECODER MACRO: Extract the 4-bit z_bits value. Caller must add 1 to get the actual bit count.
+#define DECODE_D3D12_COMPRESSED1_TEMPLATE_Z_BITS(header)    ((((header).field0) >> 16) & 0xF)
 ```
 
 ---
@@ -2072,5 +2200,4 @@ v0.14|1/26/2026|<li>In [D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS](#d3
 v0.15|2/20/2026|<li>In [D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_clas_from_triangles_args), clarified that if `VertexBufferStride` is 0, that means to take the natural stride of the vertex type.</li><li>Added `D3D12_RTAS_CLUSTER_OPERATION_CLAS_FLAG_ALLOW_DATA_ACCESS` to [D3D12_RTAS_CLUSTER_OPERATION_CLAS_FLAGS](#d3d12_rtas_cluster_operation_clas_flags) for opting in to `TriangleObjectPositions()` availability on clusters.</li><li>In [Intro](#intro) described a `ClustersAndPTLASSupported` cap exposed via [D3D12_FEATURE_D3D12_OPTIONS_NNN](raytracing.md#d3d12_feature_d3d12_options_nnn), NNN to be determined.  This lets devices support these features without having to meet all [D3D12_RAYTRACING_TIER_2_0](raytracing.md#d3d12_raytracing_tier) requirements (in particular Opacity Micromaps support from Tier 1.2). So while Tier 2.0 requires all features, a device could support everything except OMM by reporting Tier 1.1 and `ClustersAndPTLASSupported`.  This cap also implies Shader Model 6.10 support.  A device can also just support Tier 1.1 plus `TriangleObjectPositions()` by supporting SM 6.10 only (which would also bring in SER from 6.9).</li><li>In [D3D12_RTAS_BATCHED_OPERATION_DATA](#d3d12_rtas_batched_operation_data) clarified that the `ResultAddressArray` pointer provided by the app can only be NULL for `GET_SIZES`.</li>
 v0.16|3/11/2026|<li>In [D3D12_RTAS_CLUSTER_TRIANGLES_INPUTS_DESC](#d3d12_rtas_cluster_triangles_inputs_desc) clarified that `PositionTruncateBitCount` applies after converting from input vertex format to float32.</li><li>In [D3D12_RTAS_CLUSTER_OPERATION_CLAS_FLAGS](#d3d12_rtas_cluster_operation_clas_flags), clarified that `D3D12_RTAS_CLUSTER_OPERATION_CLAS_FLAG_ALLOW_DATA_ACCESS` must be consistently set (or not) for all clusters in a cluster BLAS otherwise behavior is undefined.</li><li>In [D3D12_RTAS_OPERATION_MODE](#d3d12_rtas_operation_mode) added details about what build properties can be `null` during a `GET_SIZES` operation, and how the reported size will be correspondingly conservative.</li><li>[Intro](#intro) section refinement/cleanup.</li>
 v0.17|3/12/2026|<li>Added [Why compaction doesn't apply to clustered geometry](#why-compaction-doesnt-apply-to-clustered-geometry) section</li>
-
-
+v0.18|3/16/2026|<li>Replaced C++ bitfields with plain `UINT` members (to be manually packed by user) in [D3D12_VERTEX_FORMAT_COMPRESSED1_HEADER](#compressed1-position-encoding) and [D3D12_VERTEX_FORMAT_COMPRESSED1_TEMPLATE_HEADER](#d3d12_vertex_format_compressed1_template_header) for portable layout across C++ compilers, architectures, and HLSL. Added [Compressed1 bitfield helper macros](#compressed1-bitfield-helper-macros) section with encode/decode macros from `d3d12.h` that work in both C++ and HLSL (with `UINT`/`INT` typedefs). For the same reason, in [D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_clas_from_triangles_args) replaced bitfield members with vanilla typed members.</li><li>In [D3D12_RTAS_OPERATION_BUILD_CLAS_FROM_TRIANGLES_ARGS](#d3d12_rtas_operation_build_clas_from_triangles_args), for `IndexBufferStride` limited the maximum stride value to 4 bytes. The purpose of this stride is just for cases where an application may have index values of a larger size (e.g. 4 bytes) but knows the values would happen to fit in a smaller size like 1 byte, which implementations might process more efficiently.  The intent isn't for interleaving arbitrary data between indices (something more reasonable to do with the other stride values in this struct).</li>
